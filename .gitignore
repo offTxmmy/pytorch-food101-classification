@@ -1,0 +1,27 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Testing / linting cache
+.pytest_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Dataset and generated outputs
+data/
+outputs/
+
+# Model checkpoints
+*.pt
+*.pth
+
+# Environment variables
+.env
+
+# IDE
+.idea/
