@@ -1,11 +1,10 @@
 from pathlib import Path
 
 import torch
-from torch.utils.data import Subset, DataLoader
-from torchvision.transforms import v2
-from torchvision.datasets import Food101
 from sklearn.model_selection import train_test_split
-
+from torch.utils.data import DataLoader, Subset
+from torchvision.datasets import Food101
+from torchvision.transforms import v2
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
@@ -28,57 +27,67 @@ eval_transform = v2.Compose([
     v2.Normalize(mean=TRAIN_MEAN, std=TRAIN_STD),
 ])
 
-train_base_dataset = Food101(
-    root=DATA_DIR,
-    split="train",
-    download=False,
-    transform=train_transform,
-)
+def create_dataloaders(batch_size=32, num_workers=0):
+    train_base_dataset = Food101(
+        root=DATA_DIR,
+        split="train",
+        download=False,
+        transform=train_transform,
+    )
 
-val_base_dataset = Food101(
-    root=DATA_DIR,
-    split="train",
-    download=False,
-    transform=eval_transform,
-)
+    val_base_dataset = Food101(
+        root=DATA_DIR,
+        split="train",
+        download=False,
+        transform=eval_transform,
+    )
 
-test_base_dataset = Food101(
-    root=DATA_DIR,
-    split="test",
-    download=False,
-    transform=eval_transform,
-)
+    test_base_dataset = Food101(
+        root=DATA_DIR,
+        split="test",
+        download=False,
+        transform=eval_transform,
+    )
 
-indices = list(range(len(train_base_dataset)))
-labels = train_base_dataset.labels
+    indices = list(range(len(train_base_dataset)))
+    labels = train_base_dataset.labels
 
-train_indices, val_indices = train_test_split(
-    indices,
-    test_size=0.2,
-    random_state=42,
-    stratify=labels,
-)
+    train_indices, val_indices = train_test_split(
+        indices,
+        test_size=0.2,
+        random_state=42,
+        stratify=labels,
+    )
 
-train_dataset = Subset(train_base_dataset, train_indices)
-val_dataset = Subset(val_base_dataset, val_indices)
+    train_dataset = Subset(train_base_dataset, train_indices)
+    val_dataset = Subset(val_base_dataset, val_indices)
 
-train_loader = DataLoader(
-    dataset=train_dataset,
-    batch_size=32,
-    shuffle=True,
-    num_workers=0
-)
+    train_loader = DataLoader(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers
+    )
 
-val_loader = DataLoader(
-    dataset=val_dataset,
-    batch_size=32,
-    shuffle=False,
-    num_workers=0
-)
+    val_loader = DataLoader(
+        dataset=val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers
+    )
 
-test_loader = DataLoader(
-    dataset=test_base_dataset,
-    batch_size=32,
-    shuffle=False,
-    num_workers=0
-)
+    test_loader = DataLoader(
+        dataset=test_base_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers
+    )
+
+    return train_loader, val_loader, test_loader
+
+if __name__ == "__main__":
+    train_loader, val_loader, test_loader = create_dataloaders()
+
+    train_images, train_labels = next(iter(train_loader))
+
+    print("Train batch:", train_images.shape, train_labels.shape)
