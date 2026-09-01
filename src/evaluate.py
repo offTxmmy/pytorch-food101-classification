@@ -5,11 +5,15 @@ from torch import nn
 from tqdm import tqdm
 
 from data import create_dataloaders, create_train_eval_loader
-from model import FoodCNN
+from model import FoodCNNV2
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINT_PATH = (
-    PROJECT_ROOT / "outputs" / "checkpoints" / "best_model.pth"
+    PROJECT_ROOT
+    / "outputs"
+    / "experiments"
+    / "foodcnn_v2"
+    / "best_model.pth"
 )
 
 
@@ -75,7 +79,7 @@ def main():
         num_workers=0,
     )
 
-    model = FoodCNN().to(device)
+    model = FoodCNNV2().to(device)
 
     checkpoint = torch.load(
         CHECKPOINT_PATH,

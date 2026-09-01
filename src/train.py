@@ -7,15 +7,19 @@ from torch import nn
 from tqdm import tqdm
 
 from data import create_dataloaders
-from model import FoodCNN
+from model import FoodCNNV2
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-OUTPUT_DIR = PROJECT_ROOT / "outputs"
-CHECKPOINT_DIR = OUTPUT_DIR / "checkpoints"
-HISTORY_PATH = OUTPUT_DIR / "history.json"
+EXPERIMENT_NAME = "foodcnn_v2"
 
-CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR = PROJECT_ROOT / "outputs"
+EXPERIMENT_DIR = OUTPUT_DIR / "experiments" / EXPERIMENT_NAME
+
+CHECKPOINT_PATH = EXPERIMENT_DIR / "best_model.pth"
+HISTORY_PATH = EXPERIMENT_DIR / "history.json"
+
+EXPERIMENT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
@@ -133,7 +137,12 @@ def main():
         num_workers=0,
     )
 
-    model = FoodCNN().to(device)
+    model = FoodCNNV2().to(device)
+
+    total_params = sum(p.numel() for p in model.parameters())
+
+    print(f"Experiment: {EXPERIMENT_NAME}")
+    print(f"Model parameters: {total_params:,}")
 
     criterion = nn.CrossEntropyLoss()
 
@@ -237,6 +246,7 @@ def main():
             best_val_accuracy = val_accuracy
 
             checkpoint = {
+                "experiment": EXPERIMENT_NAME,
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
@@ -249,7 +259,7 @@ def main():
 
             torch.save(
                 checkpoint,
-                CHECKPOINT_DIR / "best_model.pth",
+                CHECKPOINT_PATH,
             )
 
             print(
@@ -303,8 +313,7 @@ def main():
     )
 
     print(
-        f"Best checkpoint: "
-        f"{CHECKPOINT_DIR / 'best_model.pth'}"
+        f"Best checkpoint: {CHECKPOINT_PATH}"
     )
 
     print(
