@@ -85,6 +85,38 @@ def create_dataloaders(batch_size=32, num_workers=0):
 
     return train_loader, val_loader, test_loader
 
+def create_train_eval_loader(batch_size=32, num_workers=0):
+    train_eval_base_dataset = Food101(
+        root=DATA_DIR,
+        split="train",
+        download=False,
+        transform=eval_transform,
+    )
+
+    indices = list(range(len(train_eval_base_dataset)))
+    labels = train_eval_base_dataset.labels
+
+    train_indices, _ = train_test_split(
+        indices,
+        test_size=0.2,
+        random_state=42,
+        stratify=labels,
+    )
+
+    train_eval_dataset = Subset(
+        train_eval_base_dataset,
+        train_indices,
+    )
+
+    train_eval_loader = DataLoader(
+        dataset=train_eval_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+    )
+
+    return train_eval_loader
+
 if __name__ == "__main__":
     train_loader, val_loader, test_loader = create_dataloaders()
 
