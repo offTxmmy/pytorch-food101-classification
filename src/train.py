@@ -22,7 +22,16 @@ HISTORY_PATH = EXPERIMENT_DIR / "history.json"
 EXPERIMENT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device):
+def train_one_epoch(
+    model,
+    loader,
+    criterion,
+    optimizer,
+    scaler,
+    device,
+    amp_enabled,
+    non_blocking,
+):
     model.train()
 
     running_loss = 0.0
@@ -39,16 +48,28 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
     )
 
     for images, labels in progress_bar:
-        images = images.to(device)
-        labels = labels.to(device)
+        images = images.to(
+            device,
+            non_blocking=non_blocking,
+        )
+        labels = labels.to(
+            device,
+            non_blocking=non_blocking,
+        )
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
-        logits = model(images)
-        loss = criterion(logits, labels)
+        with torch.autocast(
+            device_type=device.type,
+            dtype=torch.float16,
+            enabled=amp_enabled,
+        ):
+            logits = model(images)
+            loss = criterion(logits, labels)
 
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         batch_size = labels.size(0)
 
@@ -77,7 +98,14 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
     return avg_loss, accuracy, elapsed_time
 
 
-def validate_one_epoch(model, loader, criterion, device):
+def validate_one_epoch(
+    model,
+    loader,
+    criterion,
+    device,
+    amp_enabled,
+    non_blocking,
+):
     model.eval()
 
     running_loss = 0.0
@@ -91,13 +119,24 @@ def validate_one_epoch(model, loader, criterion, device):
         dynamic_ncols=True,
     )
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for images, labels in progress_bar:
-            images = images.to(device)
-            labels = labels.to(device)
+            images = images.to(
+                device,
+                non_blocking=non_blocking,
+            )
+            labels = labels.to(
+                device,
+                non_blocking=non_blocking,
+            )
 
-            logits = model(images)
-            loss = criterion(logits, labels)
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16,
+                enabled=amp_enabled,
+            ):
+                logits = model(images)
+                loss = criterion(logits, labels)
 
             batch_size = labels.size(0)
 
@@ -127,28 +166,58 @@ def main():
         "cuda" if torch.cuda.is_available() else "cpu"
     )
 
+    amp_enabled = device.type == "cuda"
+    pin_memory = device.type == "cuda"
+    non_blocking = device.type == "cuda"
+
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        num_workers = 4
+    else:
+        num_workers = 0
+
     print(f"Using device: {device}")
 
     if device.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}")
 
+    print(f"AMP enabled: {amp_enabled}")
+    print(f"DataLoader workers: {num_workers}")
+    print(f"Pin memory: {pin_memory}")
+
     train_loader, val_loader, _ = create_dataloaders(
         batch_size=32,
-        num_workers=0,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
     )
 
     model = FoodCNNV2().to(device)
 
-    total_params = sum(p.numel() for p in model.parameters())
+    total_params = sum(
+        p.numel() for p in model.parameters()
+    )
+
+    trainable_params = sum(
+        p.numel()
+        for p in model.parameters()
+        if p.requires_grad
+    )
 
     print(f"Experiment: {EXPERIMENT_NAME}")
     print(f"Model parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
 
     criterion = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=1e-3,
+    )
+
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        enabled=amp_enabled,
     )
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -196,7 +265,10 @@ def main():
             loader=train_loader,
             criterion=criterion,
             optimizer=optimizer,
+            scaler=scaler,
             device=device,
+            amp_enabled=amp_enabled,
+            non_blocking=non_blocking,
         )
 
         val_loss, val_accuracy = validate_one_epoch(
@@ -204,26 +276,31 @@ def main():
             loader=val_loader,
             criterion=criterion,
             device=device,
+            amp_enabled=amp_enabled,
+            non_blocking=non_blocking,
         )
 
-        # Store metrics for this epoch.
         history["train_loss"].append(train_loss)
         history["train_accuracy"].append(train_accuracy)
         history["val_loss"].append(val_loss)
         history["val_accuracy"].append(val_accuracy)
         history["learning_rate"].append(epoch_lr)
 
-        # Persist history after every epoch so progress is not lost
-        # if training is interrupted.
-        with open(HISTORY_PATH, "w", encoding="utf-8") as file:
-            json.dump(history, file, indent=4)
+        with open(
+            HISTORY_PATH,
+            "w",
+            encoding="utf-8",
+        ) as file:
+            json.dump(
+                history,
+                file,
+                indent=4,
+            )
 
-        # Update learning rate according to validation loss.
         scheduler.step(val_loss)
 
         current_lr = optimizer.param_groups[0]["lr"]
 
-        # Early stopping monitors validation loss.
         if val_loss < best_val_loss - min_delta:
             best_val_loss = val_loss
             early_stopping_counter = 0
@@ -241,7 +318,6 @@ def main():
                 f"{early_stopping_patience})"
             )
 
-        # Save the model with the best validation accuracy.
         if val_accuracy > best_val_accuracy:
             best_val_accuracy = val_accuracy
 
@@ -251,6 +327,7 @@ def main():
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
                 "train_loss": train_loss,
                 "train_accuracy": train_accuracy,
                 "val_loss": val_loss,
@@ -264,7 +341,8 @@ def main():
 
             print(
                 f"Best model saved "
-                f"(val acc: {best_val_accuracy * 100:.2f}%)"
+                f"(val acc: "
+                f"{best_val_accuracy * 100:.2f}%)"
             )
 
         print()
@@ -287,7 +365,10 @@ def main():
             f"{epoch_lr:.1e} -> {current_lr:.1e}"
         )
 
-        print(f"Train time: {train_time:.1f} seconds")
+        print(
+            f"Train time: "
+            f"{train_time:.1f} seconds"
+        )
 
         if early_stopping_counter >= early_stopping_patience:
             print()
@@ -313,7 +394,8 @@ def main():
     )
 
     print(
-        f"Best checkpoint: {CHECKPOINT_PATH}"
+        f"Best checkpoint: "
+        f"{CHECKPOINT_PATH}"
     )
 
     print(
