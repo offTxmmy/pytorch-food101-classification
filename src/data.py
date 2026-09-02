@@ -37,6 +37,32 @@ eval_transform = v2.Compose([
 ])
 
 
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+
+resnet_train_transform = v2.Compose([
+    v2.RandomResizedCrop((224, 224)),
+    v2.RandomHorizontalFlip(),
+    v2.ToImage(),
+    v2.ToDtype(torch.float32, scale=True),
+    v2.Normalize(
+        mean=IMAGENET_MEAN,
+        std=IMAGENET_STD,
+    ),
+])
+
+resnet_eval_transform = v2.Compose([
+    v2.Resize(256),
+    v2.CenterCrop((224, 224)),
+    v2.ToImage(),
+    v2.ToDtype(torch.float32, scale=True),
+    v2.Normalize(
+        mean=IMAGENET_MEAN,
+        std=IMAGENET_STD,
+    ),
+])
+
+
 def create_dataloaders(
     batch_size=32,
     num_workers=0,
@@ -62,6 +88,87 @@ def create_dataloaders(
         split="test",
         download=False,
         transform=eval_transform,
+    )
+
+    indices = list(range(len(train_base_dataset)))
+    labels = train_base_dataset.labels
+
+    train_indices, val_indices = train_test_split(
+        indices,
+        test_size=0.2,
+        random_state=42,
+        stratify=labels,
+    )
+
+    train_dataset = Subset(
+        train_base_dataset,
+        train_indices,
+    )
+
+    val_dataset = Subset(
+        val_base_dataset,
+        val_indices,
+    )
+
+    use_persistent_workers = (
+        persistent_workers and num_workers > 0
+    )
+
+    train_loader = DataLoader(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=use_persistent_workers,
+    )
+
+    val_loader = DataLoader(
+        dataset=val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=use_persistent_workers,
+    )
+
+    test_loader = DataLoader(
+        dataset=test_base_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=use_persistent_workers,
+    )
+
+    return train_loader, val_loader, test_loader
+
+
+def create_resnet_dataloaders(
+    batch_size=32,
+    num_workers=0,
+    pin_memory=False,
+    persistent_workers=False,
+):
+    train_base_dataset = Food101(
+        root=DATA_DIR,
+        split="train",
+        download=False,
+        transform=resnet_train_transform,
+    )
+
+    val_base_dataset = Food101(
+        root=DATA_DIR,
+        split="train",
+        download=False,
+        transform=resnet_eval_transform,
+    )
+
+    test_base_dataset = Food101(
+        root=DATA_DIR,
+        split="test",
+        download=False,
+        transform=resnet_eval_transform,
     )
 
     indices = list(range(len(train_base_dataset)))

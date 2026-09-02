@@ -6,12 +6,12 @@ import torch
 from torch import nn
 from tqdm import tqdm
 
-from data import create_dataloaders
-from model import FoodCNNV2
+from data import create_resnet_dataloaders
+from model import create_resnet18
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-EXPERIMENT_NAME = "foodcnn_v2"
+EXPERIMENT_NAME = "resnet18_frozen"
 
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 EXPERIMENT_DIR = OUTPUT_DIR / "experiments" / EXPERIMENT_NAME
@@ -33,6 +33,10 @@ def train_one_epoch(
     non_blocking,
 ):
     model.train()
+
+    for module in model.modules():
+        if isinstance(module, nn.BatchNorm2d):
+            module.eval()
 
     running_loss = 0.0
     correct = 0
@@ -185,14 +189,17 @@ def main():
     print(f"DataLoader workers: {num_workers}")
     print(f"Pin memory: {pin_memory}")
 
-    train_loader, val_loader, _ = create_dataloaders(
+    train_loader, val_loader, _ = create_resnet_dataloaders(
         batch_size=32,
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
     )
 
-    model = FoodCNNV2().to(device)
+    model = create_resnet18(
+        num_classes=101,
+        freeze_backbone=True,
+    ).to(device)
 
     total_params = sum(
         p.numel() for p in model.parameters()
@@ -211,12 +218,16 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(
-        model.parameters(),
+        (
+            parameter
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        ),
         lr=1e-3,
     )
 
     scaler = torch.amp.GradScaler(
-        "cuda",
+        device.type,
         enabled=amp_enabled,
     )
 
@@ -224,7 +235,7 @@ def main():
         optimizer,
         mode="min",
         factor=0.5,
-        patience=2,
+        patience=1,
         min_lr=1e-6,
     )
 
@@ -240,10 +251,10 @@ def main():
     best_val_loss = float("inf")
 
     early_stopping_counter = 0
-    early_stopping_patience = 5
+    early_stopping_patience = 3
     min_delta = 1e-4
 
-    num_epochs = 25
+    num_epochs = 10
 
     print()
     print(f"Starting training for up to {num_epochs} epochs")
@@ -323,6 +334,9 @@ def main():
 
             checkpoint = {
                 "experiment": EXPERIMENT_NAME,
+                "freeze_backbone": True,
+                "num_classes": 101,
+                "amp_enabled": amp_enabled,
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),

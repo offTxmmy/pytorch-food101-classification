@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torchvision.models import ResNet18_Weights, resnet18
 
 
 class FoodCNN(nn.Module):
@@ -179,30 +180,40 @@ class FoodCNNV2(nn.Module):
         x = self.classifier(x)
         return x
 
+def create_resnet18(
+    num_classes=101,
+    freeze_backbone=True,
+):
+    weights = ResNet18_Weights.DEFAULT
+
+    model = resnet18(weights=weights)
+
+    if freeze_backbone:
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+
+    in_features = model.fc.in_features
+
+    model.fc = nn.Linear(
+        in_features=in_features,
+        out_features=num_classes,
+    )
+
+    return model
+
 if __name__ == "__main__":
-    from data import create_dataloaders
+    from data import create_resnet_dataloaders
 
     device = torch.device(
         "cuda" if torch.cuda.is_available() else "cpu"
     )
 
-    print("Device:", device)
+    model = create_resnet18(
+        num_classes=101,
+        freeze_backbone=True,
+    ).to(device)
 
-    model = FoodCNNV2().to(device)
-
-    total_params = sum(
-        p.numel() for p in model.parameters()
-    )
-    trainable_params = sum(
-        p.numel()
-        for p in model.parameters()
-        if p.requires_grad
-    )
-
-    print("Total parameters:", total_params)
-    print("Trainable parameters:", trainable_params)
-
-    train_loader, _, _ = create_dataloaders(
+    train_loader, _, _ = create_resnet_dataloaders(
         batch_size=32,
         num_workers=0,
     )
@@ -215,53 +226,39 @@ if __name__ == "__main__":
     criterion = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(
-        model.parameters(),
+        (
+            parameter
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        ),
         lr=1e-3,
     )
 
-    model.train()
     optimizer.zero_grad()
-
-    if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats()
 
     logits = model(images)
     loss = criterion(logits, labels)
 
     loss.backward()
-    optimizer.step()
 
     print("Images shape:", images.shape)
     print("Labels shape:", labels.shape)
     print("Logits shape:", logits.shape)
     print("Loss:", loss.item())
 
-    first_conv = model.block1[0]
-
     print(
-        "First conv gradient exists:",
-        first_conv.weight.grad is not None,
+        "Classifier gradient exists:",
+        model.fc.weight.grad is not None,
     )
 
     print(
-        "First conv gradient norm:",
-        first_conv.weight.grad.norm().item(),
+        "Classifier gradient norm:",
+        model.fc.weight.grad.norm().item(),
     )
 
-    if device.type == "cuda":
-        allocated_gb = (
-            torch.cuda.memory_allocated() / 1024**3
-        )
-        peak_gb = (
-            torch.cuda.max_memory_allocated() / 1024**3
-        )
+    print(
+        "Backbone conv1 gradient:",
+        model.conv1.weight.grad,
+    )
 
-        print(
-            f"CUDA memory allocated: "
-            f"{allocated_gb:.2f} GB"
-        )
-
-        print(
-            f"CUDA peak memory: "
-            f"{peak_gb:.2f} GB"
-        )
+    optimizer.step()
