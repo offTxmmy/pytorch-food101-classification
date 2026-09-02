@@ -201,6 +201,15 @@ def create_resnet18(
 
     return model
 
+def enable_partial_finetuning(model):
+    for parameter in model.layer4.parameters():
+        parameter.requires_grad = True
+
+    for parameter in model.fc.parameters():
+        parameter.requires_grad = True
+
+    return model
+
 if __name__ == "__main__":
     from data import create_resnet_dataloaders
 

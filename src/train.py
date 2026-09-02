@@ -7,11 +7,12 @@ from torch import nn
 from tqdm import tqdm
 
 from data import create_resnet_dataloaders
-from model import create_resnet18
+from model import create_resnet18, enable_partial_finetuning
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-EXPERIMENT_NAME = "resnet18_frozen"
+EXPERIMENT_NAME = "resnet18_partial_finetune"
 
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 EXPERIMENT_DIR = OUTPUT_DIR / "experiments" / EXPERIMENT_NAME
@@ -19,8 +20,44 @@ EXPERIMENT_DIR = OUTPUT_DIR / "experiments" / EXPERIMENT_NAME
 CHECKPOINT_PATH = EXPERIMENT_DIR / "best_model.pth"
 HISTORY_PATH = EXPERIMENT_DIR / "history.json"
 
+SOURCE_CHECKPOINT_PATH = (
+    OUTPUT_DIR
+    / "experiments"
+    / "resnet18_frozen"
+    / "best_model.pth"
+)
+
 EXPERIMENT_DIR.mkdir(parents=True, exist_ok=True)
 
+
+# ============================================================
+# BATCHNORM POLICY
+# ============================================================
+
+def set_frozen_batchnorm_eval(model):
+    """
+    Keep BatchNorm layers belonging to the frozen backbone
+    in eval mode.
+
+    layer4 BatchNorm layers are intentionally left untouched
+    so that they remain in train mode during partial fine-tuning.
+    """
+
+    model.bn1.eval()
+
+    for layer in (
+        model.layer1,
+        model.layer2,
+        model.layer3,
+    ):
+        for module in layer.modules():
+            if isinstance(module, nn.BatchNorm2d):
+                module.eval()
+
+
+# ============================================================
+# TRAINING
+# ============================================================
 
 def train_one_epoch(
     model,
@@ -34,9 +71,9 @@ def train_one_epoch(
 ):
     model.train()
 
-    for module in model.modules():
-        if isinstance(module, nn.BatchNorm2d):
-            module.eval()
+    # model.train() sets every BatchNorm to training mode.
+    # Restore eval mode only for the frozen part.
+    set_frozen_batchnorm_eval(model)
 
     running_loss = 0.0
     correct = 0
@@ -56,12 +93,15 @@ def train_one_epoch(
             device,
             non_blocking=non_blocking,
         )
+
         labels = labels.to(
             device,
             non_blocking=non_blocking,
         )
 
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad(
+            set_to_none=True
+        )
 
         with torch.autocast(
             device_type=device.type,
@@ -69,38 +109,68 @@ def train_one_epoch(
             enabled=amp_enabled,
         ):
             logits = model(images)
-            loss = criterion(logits, labels)
+            loss = criterion(
+                logits,
+                labels,
+            )
 
         scaler.scale(loss).backward()
+
         scaler.step(optimizer)
         scaler.update()
 
         batch_size = labels.size(0)
 
-        running_loss += loss.item() * batch_size
+        running_loss += (
+            loss.item() * batch_size
+        )
 
-        predictions = logits.argmax(dim=1)
-        correct += (predictions == labels).sum().item()
+        predictions = logits.argmax(
+            dim=1
+        )
+
+        correct += (
+            predictions == labels
+        ).sum().item()
 
         total += batch_size
 
         avg_loss = running_loss / total
         accuracy = correct / total
-        learning_rate = optimizer.param_groups[0]["lr"]
+
+        layer4_lr = (
+            optimizer.param_groups[0]["lr"]
+        )
+
+        fc_lr = (
+            optimizer.param_groups[1]["lr"]
+        )
 
         progress_bar.set_postfix(
             loss=f"{avg_loss:.4f}",
             acc=f"{accuracy * 100:.2f}%",
-            lr=f"{learning_rate:.1e}",
+            lr4=f"{layer4_lr:.1e}",
+            lrfc=f"{fc_lr:.1e}",
         )
 
-    elapsed_time = time.perf_counter() - start_time
+    elapsed_time = (
+        time.perf_counter()
+        - start_time
+    )
 
     avg_loss = running_loss / total
     accuracy = correct / total
 
-    return avg_loss, accuracy, elapsed_time
+    return (
+        avg_loss,
+        accuracy,
+        elapsed_time,
+    )
 
+
+# ============================================================
+# VALIDATION
+# ============================================================
 
 def validate_one_epoch(
     model,
@@ -129,6 +199,7 @@ def validate_one_epoch(
                 device,
                 non_blocking=non_blocking,
             )
+
             labels = labels.to(
                 device,
                 non_blocking=non_blocking,
@@ -140,23 +211,41 @@ def validate_one_epoch(
                 enabled=amp_enabled,
             ):
                 logits = model(images)
-                loss = criterion(logits, labels)
+
+                loss = criterion(
+                    logits,
+                    labels,
+                )
 
             batch_size = labels.size(0)
 
-            running_loss += loss.item() * batch_size
+            running_loss += (
+                loss.item() * batch_size
+            )
 
-            predictions = logits.argmax(dim=1)
-            correct += (predictions == labels).sum().item()
+            predictions = logits.argmax(
+                dim=1
+            )
+
+            correct += (
+                predictions == labels
+            ).sum().item()
 
             total += batch_size
 
-            avg_loss = running_loss / total
-            accuracy = correct / total
+            avg_loss = (
+                running_loss / total
+            )
+
+            accuracy = (
+                correct / total
+            )
 
             progress_bar.set_postfix(
                 loss=f"{avg_loss:.4f}",
-                acc=f"{accuracy * 100:.2f}%",
+                acc=(
+                    f"{accuracy * 100:.2f}%"
+                ),
             )
 
     avg_loss = running_loss / total
@@ -165,14 +254,28 @@ def validate_one_epoch(
     return avg_loss, accuracy
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
     device = torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
     )
 
-    amp_enabled = device.type == "cuda"
-    pin_memory = device.type == "cuda"
-    non_blocking = device.type == "cuda"
+    amp_enabled = (
+        device.type == "cuda"
+    )
+
+    pin_memory = (
+        device.type == "cuda"
+    )
+
+    non_blocking = (
+        device.type == "cuda"
+    )
 
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
@@ -183,95 +286,340 @@ def main():
     print(f"Using device: {device}")
 
     if device.type == "cuda":
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(
+            f"GPU: "
+            f"{torch.cuda.get_device_name(0)}"
+        )
 
-    print(f"AMP enabled: {amp_enabled}")
-    print(f"DataLoader workers: {num_workers}")
-    print(f"Pin memory: {pin_memory}")
-
-    train_loader, val_loader, _ = create_resnet_dataloaders(
-        batch_size=32,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=num_workers > 0,
+    print(
+        f"AMP enabled: {amp_enabled}"
     )
+
+    print(
+        f"DataLoader workers: "
+        f"{num_workers}"
+    )
+
+    print(
+        f"Pin memory: {pin_memory}"
+    )
+
+    # ========================================================
+    # DATA
+    # ========================================================
+
+    train_loader, val_loader, _ = (
+        create_resnet_dataloaders(
+            batch_size=32,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=(
+                num_workers > 0
+            ),
+        )
+    )
+
+    # ========================================================
+    # MODEL
+    # ========================================================
 
     model = create_resnet18(
         num_classes=101,
         freeze_backbone=True,
-    ).to(device)
+    )
+
+    # ========================================================
+    # LOAD BEST FROZEN MODEL
+    # ========================================================
+
+    source_checkpoint = torch.load(
+        SOURCE_CHECKPOINT_PATH,
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    model.load_state_dict(
+        source_checkpoint[
+            "model_state_dict"
+        ]
+    )
+
+    # layer4 + fc become trainable.
+    model = enable_partial_finetuning(
+        model
+    )
+
+    model = model.to(device)
+
+    # ========================================================
+    # PARAMETER CHECK
+    # ========================================================
 
     total_params = sum(
-        p.numel() for p in model.parameters()
+        parameter.numel()
+        for parameter in model.parameters()
     )
 
     trainable_params = sum(
-        p.numel()
-        for p in model.parameters()
-        if p.requires_grad
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
     )
 
-    print(f"Experiment: {EXPERIMENT_NAME}")
-    print(f"Model parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
+    frozen_params = (
+        total_params
+        - trainable_params
+    )
+
+    print()
+    print("=" * 60)
+    print(
+        "PARTIAL FINE-TUNING CONFIGURATION"
+    )
+    print("=" * 60)
+
+    print(
+        f"Source checkpoint epoch: "
+        f"{source_checkpoint['epoch']}"
+    )
+
+    print(
+        f"Source validation accuracy: "
+        f"{source_checkpoint['val_accuracy'] * 100:.2f}%"
+    )
+
+    print()
+    print(
+        f"Experiment: "
+        f"{EXPERIMENT_NAME}"
+    )
+
+    print(
+        f"Total parameters: "
+        f"{total_params:,}"
+    )
+
+    print(
+        f"Trainable parameters: "
+        f"{trainable_params:,}"
+    )
+
+    print(
+        f"Frozen parameters: "
+        f"{frozen_params:,}"
+    )
+
+    # ========================================================
+    # SAFETY ASSERTIONS
+    # ========================================================
+
+    assert (
+        model.conv1.weight.requires_grad
+        is False
+    )
+
+    assert (
+        model.layer3[0]
+        .conv1.weight.requires_grad
+        is False
+    )
+
+    assert (
+        model.layer4[0]
+        .conv1.weight.requires_grad
+        is True
+    )
+
+    assert (
+        model.fc.weight.requires_grad
+        is True
+    )
+
+    # ========================================================
+    # BATCHNORM SANITY CHECK
+    # ========================================================
+
+    model.train()
+    set_frozen_batchnorm_eval(model)
+
+    assert (
+        model.bn1.training
+        is False
+    )
+
+    assert (
+        model.layer3[0]
+        .bn1.training
+        is False
+    )
+
+    assert (
+        model.layer4[0]
+        .bn1.training
+        is True
+    )
+
+    assert (
+        model.layer3[0]
+        .bn1.weight.requires_grad
+        is False
+    )
+
+    assert (
+        model.layer4[0]
+        .bn1.weight.requires_grad
+        is True
+    )
+
+    print()
+    print("Trainable layers:")
+    print("  layer4: True")
+    print("  fc: True")
+
+    print()
+    print("Frozen BatchNorm:")
+    print("  bn1: True")
+    print("  layer1: True")
+    print("  layer2: True")
+    print("  layer3: True")
+    print("  layer4: False")
+
+    # ========================================================
+    # LOSS
+    # ========================================================
 
     criterion = nn.CrossEntropyLoss()
 
+    # ========================================================
+    # DIFFERENTIAL LEARNING RATES
+    # ========================================================
+
+    layer4_initial_lr = 1e-4
+    fc_initial_lr = 5e-4
+
     optimizer = torch.optim.Adam(
-        (
-            parameter
-            for parameter in model.parameters()
-            if parameter.requires_grad
-        ),
-        lr=1e-3,
+        [
+            {
+                "params": (
+                    model.layer4.parameters()
+                ),
+                "lr": layer4_initial_lr,
+            },
+            {
+                "params": (
+                    model.fc.parameters()
+                ),
+                "lr": fc_initial_lr,
+            },
+        ]
     )
+
+    print()
+    print(
+        f"layer4 learning rate: "
+        f"{layer4_initial_lr:.1e}"
+    )
+
+    print(
+        f"fc learning rate: "
+        f"{fc_initial_lr:.1e}"
+    )
+
+    # ========================================================
+    # AMP
+    # ========================================================
 
     scaler = torch.amp.GradScaler(
         device.type,
         enabled=amp_enabled,
     )
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="min",
-        factor=0.5,
-        patience=1,
-        min_lr=1e-6,
+    # ========================================================
+    # LR SCHEDULER
+    # ========================================================
+
+    scheduler = (
+        torch.optim.lr_scheduler
+        .ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,
+            patience=2,
+            min_lr=[
+                1e-6,
+                5e-6,
+            ],
+        )
     )
+
+    # ========================================================
+    # HISTORY
+    # ========================================================
 
     history = {
         "train_loss": [],
         "train_accuracy": [],
         "val_loss": [],
         "val_accuracy": [],
-        "learning_rate": [],
+        "layer4_learning_rate": [],
+        "fc_learning_rate": [],
     }
 
     best_val_accuracy = 0.0
     best_val_loss = float("inf")
 
     early_stopping_counter = 0
-    early_stopping_patience = 3
+
+    early_stopping_patience = 6
+
     min_delta = 1e-4
 
-    num_epochs = 10
+    num_epochs = 50
 
     print()
-    print(f"Starting training for up to {num_epochs} epochs")
+    print(
+        f"Starting training for up to "
+        f"{num_epochs} epochs"
+    )
+
     print(
         f"Early stopping patience: "
-        f"{early_stopping_patience} epochs"
+        f"{early_stopping_patience}"
     )
+
+    print(
+        "Scheduler: ReduceLROnPlateau "
+        "(patience=2, factor=0.5)"
+    )
+
+    # ========================================================
+    # TRAINING LOOP
+    # ========================================================
 
     for epoch in range(num_epochs):
         print()
         print("=" * 60)
-        print(f"Epoch {epoch + 1}/{num_epochs}")
+
+        print(
+            f"Epoch "
+            f"{epoch + 1}/{num_epochs}"
+        )
+
         print("=" * 60)
 
-        epoch_lr = optimizer.param_groups[0]["lr"]
+        epoch_layer4_lr = (
+            optimizer.param_groups[0]["lr"]
+        )
 
-        train_loss, train_accuracy, train_time = train_one_epoch(
+        epoch_fc_lr = (
+            optimizer.param_groups[1]["lr"]
+        )
+
+        (
+            train_loss,
+            train_accuracy,
+            train_time,
+        ) = train_one_epoch(
             model=model,
             loader=train_loader,
             criterion=criterion,
@@ -282,7 +630,10 @@ def main():
             non_blocking=non_blocking,
         )
 
-        val_loss, val_accuracy = validate_one_epoch(
+        (
+            val_loss,
+            val_accuracy,
+        ) = validate_one_epoch(
             model=model,
             loader=val_loader,
             criterion=criterion,
@@ -291,11 +642,41 @@ def main():
             non_blocking=non_blocking,
         )
 
-        history["train_loss"].append(train_loss)
-        history["train_accuracy"].append(train_accuracy)
-        history["val_loss"].append(val_loss)
-        history["val_accuracy"].append(val_accuracy)
-        history["learning_rate"].append(epoch_lr)
+        # ====================================================
+        # HISTORY
+        # ====================================================
+
+        history["train_loss"].append(
+            train_loss
+        )
+
+        history[
+            "train_accuracy"
+        ].append(
+            train_accuracy
+        )
+
+        history["val_loss"].append(
+            val_loss
+        )
+
+        history[
+            "val_accuracy"
+        ].append(
+            val_accuracy
+        )
+
+        history[
+            "layer4_learning_rate"
+        ].append(
+            epoch_layer4_lr
+        )
+
+        history[
+            "fc_learning_rate"
+        ].append(
+            epoch_fc_lr
+        )
 
         with open(
             HISTORY_PATH,
@@ -308,48 +689,118 @@ def main():
                 indent=4,
             )
 
+        # ====================================================
+        # SCHEDULER
+        # ====================================================
+
         scheduler.step(val_loss)
 
-        current_lr = optimizer.param_groups[0]["lr"]
+        current_layer4_lr = (
+            optimizer.param_groups[0]["lr"]
+        )
 
-        if val_loss < best_val_loss - min_delta:
+        current_fc_lr = (
+            optimizer.param_groups[1]["lr"]
+        )
+
+        # ====================================================
+        # EARLY STOPPING
+        # ====================================================
+
+        if (
+            val_loss
+            < best_val_loss - min_delta
+        ):
             best_val_loss = val_loss
+
             early_stopping_counter = 0
 
             print(
-                f"Validation loss improved to "
-                f"{best_val_loss:.4f}"
+                f"Validation loss improved "
+                f"to {best_val_loss:.4f}"
             )
+
         else:
             early_stopping_counter += 1
 
             print(
-                f"No validation loss improvement "
+                f"No validation loss "
+                f"improvement "
                 f"({early_stopping_counter}/"
                 f"{early_stopping_patience})"
             )
 
-        if val_accuracy > best_val_accuracy:
-            best_val_accuracy = val_accuracy
+        # ====================================================
+        # BEST MODEL BY VALIDATION ACCURACY
+        # ====================================================
 
-            checkpoint = {
-                "experiment": EXPERIMENT_NAME,
-                "freeze_backbone": True,
+        if (
+            val_accuracy
+            > best_val_accuracy
+        ):
+            best_val_accuracy = (
+                val_accuracy
+            )
+
+            output_checkpoint = {
+                "experiment": (
+                    EXPERIMENT_NAME
+                ),
+                "finetuning_mode": (
+                    "partial"
+                ),
+                "trainable_layers": [
+                    "layer4",
+                    "fc",
+                ],
+                "source_experiment": (
+                    "resnet18_frozen"
+                ),
+                "source_epoch": (
+                    source_checkpoint[
+                        "epoch"
+                    ]
+                ),
+                "source_val_accuracy": (
+                    source_checkpoint[
+                        "val_accuracy"
+                    ]
+                ),
                 "num_classes": 101,
-                "amp_enabled": amp_enabled,
+                "amp_enabled": (
+                    amp_enabled
+                ),
                 "epoch": epoch + 1,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "scaler_state_dict": scaler.state_dict(),
+                "layer4_learning_rate": (
+                    epoch_layer4_lr
+                ),
+                "fc_learning_rate": (
+                    epoch_fc_lr
+                ),
+                "model_state_dict": (
+                    model.state_dict()
+                ),
+                "optimizer_state_dict": (
+                    optimizer.state_dict()
+                ),
+                "scheduler_state_dict": (
+                    scheduler.state_dict()
+                ),
+                "scaler_state_dict": (
+                    scaler.state_dict()
+                ),
                 "train_loss": train_loss,
-                "train_accuracy": train_accuracy,
+                "train_accuracy": (
+                    train_accuracy
+                ),
                 "val_loss": val_loss,
-                "val_accuracy": val_accuracy,
+                "val_accuracy": (
+                    val_accuracy
+                ),
             }
 
             torch.save(
-                checkpoint,
+                output_checkpoint,
                 CHECKPOINT_PATH,
             )
 
@@ -359,24 +810,44 @@ def main():
                 f"{best_val_accuracy * 100:.2f}%)"
             )
 
+        # ====================================================
+        # EPOCH SUMMARY
+        # ====================================================
+
         print()
-        print(f"Epoch {epoch + 1}/{num_epochs} completed")
+
+        print(
+            f"Epoch "
+            f"{epoch + 1}/{num_epochs} "
+            f"completed"
+        )
 
         print(
             f"Train | "
             f"loss: {train_loss:.4f} | "
-            f"acc: {train_accuracy * 100:.2f}%"
+            f"acc: "
+            f"{train_accuracy * 100:.2f}%"
         )
 
         print(
             f"Val   | "
             f"loss: {val_loss:.4f} | "
-            f"acc: {val_accuracy * 100:.2f}%"
+            f"acc: "
+            f"{val_accuracy * 100:.2f}%"
         )
 
         print(
-            f"LR    | "
-            f"{epoch_lr:.1e} -> {current_lr:.1e}"
+            f"LR layer4 | "
+            f"{epoch_layer4_lr:.1e} "
+            f"-> "
+            f"{current_layer4_lr:.1e}"
+        )
+
+        print(
+            f"LR fc     | "
+            f"{epoch_fc_lr:.1e} "
+            f"-> "
+            f"{current_fc_lr:.1e}"
         )
 
         print(
@@ -384,13 +855,26 @@ def main():
             f"{train_time:.1f} seconds"
         )
 
-        if early_stopping_counter >= early_stopping_patience:
+        # ====================================================
+        # STOP
+        # ====================================================
+
+        if (
+            early_stopping_counter
+            >= early_stopping_patience
+        ):
             print()
+
             print(
-                f"Early stopping triggered at "
-                f"epoch {epoch + 1}."
+                f"Early stopping triggered "
+                f"at epoch {epoch + 1}."
             )
+
             break
+
+    # ========================================================
+    # FINAL SUMMARY
+    # ========================================================
 
     print()
     print("=" * 60)
@@ -405,6 +889,23 @@ def main():
     print(
         f"Best validation loss: "
         f"{best_val_loss:.4f}"
+    )
+
+    print(
+        f"Frozen baseline accuracy: "
+        f"{source_checkpoint['val_accuracy'] * 100:.2f}%"
+    )
+
+    improvement = (
+        best_val_accuracy
+        - source_checkpoint[
+            "val_accuracy"
+        ]
+    ) * 100
+
+    print(
+        f"Improvement over frozen: "
+        f"{improvement:+.2f} pp"
     )
 
     print(
